@@ -323,6 +323,37 @@ int main(void) {
   CHECK(!xauthority_path_is_confined(&xauthority_identity));
   CHECK(!validate_xauthority(&xauthority_identity));
 
+  struct session_identity hyprland_identity = {0};
+  strcpy(hyprland_identity.role, "desktop");
+  strcpy(hyprland_identity.compositor, "plasma");
+  CHECK(compositor_identity_is_safe(&hyprland_identity));
+  CHECK(!validate_xauthority(&hyprland_identity));
+  strcpy(hyprland_identity.compositor, "hyprland");
+  CHECK(!compositor_identity_is_safe(&hyprland_identity));
+  CHECK(!validate_xauthority(&hyprland_identity));
+  strcpy(hyprland_identity.hyprland_instance, "abcdef_123_456");
+  CHECK(compositor_identity_is_safe(&hyprland_identity));
+  CHECK(validate_xauthority(&hyprland_identity));
+  struct session_identity changed_identity = hyprland_identity;
+  CHECK(identities_match(&hyprland_identity, &changed_identity));
+  strcpy(changed_identity.hyprland_instance, "abcdef_123_457");
+  CHECK(!identities_match(&hyprland_identity, &changed_identity));
+  changed_identity = hyprland_identity;
+  strcpy(changed_identity.compositor, "plasma");
+  CHECK(!identities_match(&hyprland_identity, &changed_identity));
+  CHECK(!compositor_identity_is_safe(&changed_identity));
+  strcpy(hyprland_identity.role, "greeter");
+  CHECK(!compositor_identity_is_safe(&hyprland_identity));
+  strcpy(hyprland_identity.role, "desktop");
+  const char *invalid_instances[] = {"", "..", "../other", "first/second", "bad.instance", "bad instance", "bad\ninstance"};
+  for (size_t index = 0; index < sizeof(invalid_instances) / sizeof(invalid_instances[0]); ++index) {
+    strcpy(hyprland_identity.hyprland_instance, invalid_instances[index]);
+    CHECK(!compositor_identity_is_safe(&hyprland_identity));
+    CHECK(!validate_xauthority(&hyprland_identity));
+  }
+  strcpy(hyprland_identity.compositor, "unknown");
+  CHECK(!compositor_identity_is_safe(&hyprland_identity));
+
   CHECK(runtime_mode_is_safe(0700));
   CHECK(!runtime_mode_is_safe(0710));
   CHECK(!runtime_mode_is_safe(0770));

@@ -32,6 +32,8 @@ candidate_xdisplay=''
 candidate_xauthority=''
 candidate_groups=''
 candidate_role=''
+candidate_compositor=plasma
+candidate_hyprland_instance=''
 candidate_generation=''
 last_status=''
 shutting_down=0
@@ -54,6 +56,8 @@ valid_user() { [[ "$1" =~ ^[a-z_][a-z0-9_-]*$ ]]; }
 # Plasma Login Manager and SDDM both start the Plasma Wayland desktop through
 # the systemd user manager, which session readiness verifies unit by unit.
 desktop_service_supported() { [[ "$1" =~ ^(plasmalogin|plasmalogin-autologin|sddm|sddm-autologin)$ ]]; }
+hyprland_session_supported() { [[ "$1" == ly && "$2" == Hyprland ]]; }
+valid_hyprland_instance() { [[ ${#1} -le 192 && "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
 valid_uid() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 valid_session_id() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; }
 valid_wayland_display() { [[ "$1" =~ ^wayland-[0-9]+$ ]]; }
@@ -89,6 +93,8 @@ clear_candidate() {
   candidate_xauthority=''
   candidate_groups=''
   candidate_role=''
+  candidate_compositor=plasma
+  candidate_hyprland_instance=''
   candidate_generation=''
 }
 
@@ -128,7 +134,7 @@ loginctl_session_properties() {
     /usr/bin/loginctl show-session "$session" --no-pager \
       --property=User --property=Name --property=Seat --property=Remote \
       --property=Type --property=Class --property=Active --property=State \
-      --property=Service 2>/dev/null
+      --property=Service --property=Desktop 2>/dev/null
 }
 
 rejected_session=''
@@ -138,6 +144,7 @@ observe_active_session() {
   rejected_session=''
   local observed_user='' observed_name='' observed_seat='' observed_remote=''
   local observed_type='' observed_class='' observed_active='' observed_state='' observed_service=''
+  local observed_desktop=''
   local entry
   clear_candidate
   candidate_session=$(loginctl_active_session) || return 1
@@ -157,6 +164,7 @@ observe_active_session() {
       Active) [[ -z "$observed_active" ]] || return 1; observed_active=$value ;;
       State) [[ -z "$observed_state" ]] || return 1; observed_state=$value ;;
       Service) [[ -z "$observed_service" ]] || return 1; observed_service=$value ;;
+      Desktop) [[ -z "$observed_desktop" ]] || return 1; observed_desktop=$value ;;
       *) return 1 ;;
     esac
   done <<<"$properties"
@@ -166,7 +174,11 @@ observe_active_session() {
      "$observed_state" == active ]] || return 1
 
   if [[ "$observed_name" == "$desktop_user" && "$observed_user" == "$desktop_uid" &&
-        "$observed_class" == user ]] && desktop_service_supported "$observed_service"; then
+        "$observed_class" == user ]] && hyprland_session_supported "$observed_service" "$observed_desktop"; then
+    candidate_role=desktop
+    candidate_compositor=hyprland
+  elif [[ "$observed_name" == "$desktop_user" && "$observed_user" == "$desktop_uid" &&
+          "$observed_class" == user ]] && desktop_service_supported "$observed_service"; then
     candidate_role=desktop
   elif [[ "$observed_name" == "$greeter_user" && "$observed_class" == greeter &&
           "$observed_service" == plasmalogin-greeter ]]; then
@@ -249,6 +261,7 @@ read_user_environment() {
   candidate_display=''
   candidate_xdisplay=''
   candidate_xauthority=''
+  candidate_hyprland_instance=''
   environment=$(user_systemctl "$candidate_user" "$candidate_uid" "$candidate_gid" "$candidate_runtime" \
     show-environment 2>/dev/null | /usr/bin/head -c 65537) || return 1
   ((${#environment} <= 65536)) || return 1
@@ -260,6 +273,7 @@ read_user_environment() {
       WAYLAND_DISPLAY) [[ -z "$wayland" ]] || return 1; wayland=$value ;;
       DISPLAY) [[ -z "$candidate_xdisplay" ]] || return 1; candidate_xdisplay=$value ;;
       XAUTHORITY) [[ -z "$candidate_xauthority" ]] || return 1; candidate_xauthority=$value ;;
+      HYPRLAND_INSTANCE_SIGNATURE) [[ -z "$candidate_hyprland_instance" ]] || return 1; candidate_hyprland_instance=$value ;;
     esac
   done <<<"$environment"
   valid_wayland_display "$wayland" || return 1
@@ -270,9 +284,28 @@ read_user_environment() {
   [[ "$socket_attributes" == "$candidate_uid:socket" ]] || return 1
   candidate_display=$wayland
 
+  if [[ "$candidate_compositor" == hyprland ]]; then
+    valid_hyprland_instance "$candidate_hyprland_instance" || return 1
+    local endpoint="$candidate_runtime/hypr/$candidate_hyprland_instance/.socket.sock" directory
+    for directory in "$candidate_runtime/hypr" "$candidate_runtime/hypr/$candidate_hyprland_instance"; do
+      socket_attributes=$(/usr/bin/setpriv --reuid "$candidate_uid" --regid "$candidate_gid" --init-groups --no-new-privs -- \
+        /usr/bin/stat -c '%u:%F' -- "$directory") || return 1
+      [[ "$socket_attributes" == "$candidate_uid:directory" ]] || return 1
+    done
+    socket_attributes=$(/usr/bin/setpriv --reuid "$candidate_uid" --regid "$candidate_gid" --init-groups --no-new-privs -- \
+      /usr/bin/stat -c '%u:%F' -- "$endpoint") || return 1
+    [[ "$socket_attributes" == "$candidate_uid:socket" ]] || return 1
+  else
+    candidate_hyprland_instance=''
+  fi
+
   if [[ "$candidate_role" == desktop ]]; then
     valid_xdisplay "$candidate_xdisplay" || return 1
-    xauthority_is_private "$candidate_xauthority" || return 1
+    # Hyprland's Xwayland accepts same-user local clients without an auth file.
+    # Plasma retains its private runtime-file requirement; both paths probe X11.
+    if [[ "$candidate_compositor" != hyprland || -n "$candidate_xauthority" ]]; then
+      xauthority_is_private "$candidate_xauthority" || return 1
+    fi
   else
     candidate_xdisplay=''
     candidate_xauthority=''
@@ -284,6 +317,18 @@ probe_wayland() {
     /usr/bin/env -i "HOME=$candidate_home" "USER=$candidate_user" "LOGNAME=$candidate_user" \
         "PATH=/usr/bin" "XDG_RUNTIME_DIR=$candidate_runtime" \
         "WAYLAND_DISPLAY=$candidate_display" /usr/bin/wayland-info >/dev/null 2>&1 || return 1
+  if [[ "$candidate_compositor" == hyprland ]]; then
+    # Bind the compositor instance to the probed Wayland socket. Never let
+    # hyprctl choose another instance owned by the same desktop account.
+    session_command_bounded "$command_timeout" "$candidate_uid" "$candidate_gid" \
+      /usr/bin/env -i "PATH=/usr/bin" "XDG_RUNTIME_DIR=$candidate_runtime" \
+        "WAYLAND_DISPLAY=$candidate_display" "HYPRLAND_INSTANCE_SIGNATURE=$candidate_hyprland_instance" \
+        /usr/bin/bash -c 'set -o pipefail
+          /usr/bin/hyprctl -j instances | /usr/bin/head -c 1048577 |
+            /usr/bin/jq -e --arg instance "$HYPRLAND_INSTANCE_SIGNATURE" --arg display "$WAYLAND_DISPLAY" \
+              '\''[.[] | select(.instance == $instance and .wl_socket == $display)] | length == 1'\'' >/dev/null'
+    return $?
+  fi
   # KScreen output is controlled by the session account. Bound both its size
   # and execution time, and keep JSON parsing below the UID boundary.
   session_command_bounded "$command_timeout" "$candidate_uid" "$candidate_gid" \
@@ -323,6 +368,10 @@ session_is_ready() {
     user_unit_running plasma-login-wayland.target || return 1
     user_unit_running plasma-login-kwin_wayland.service || return 1
     user_unit_running plasma-login.service || return 1
+  elif [[ "$candidate_compositor" == hyprland ]]; then
+    user_unit_running graphical-session.target || return 1
+    user_unit_running wayland-session@hyprland.desktop.target || return 1
+    user_unit_running wayland-wm@hyprland.desktop.service || return 1
   else
     user_unit_running plasma-workspace-wayland.target || return 1
     user_unit_running graphical-session.target || return 1
@@ -433,11 +482,15 @@ read_session_record() {
     [[ "$line" == *=* ]] || return 1
     key=${line%%=*}
     value=${line#*=}
-    [[ "$key" =~ ^(session|generation|user|uid|gid|home|runtime|display|xdisplay|xauthority|groups|role)$ ]] || return 1
+    [[ "$key" =~ ^(session|generation|user|uid|gid|home|runtime|display|xdisplay|xauthority|groups|role|compositor|hyprland_instance)$ ]] || return 1
     [[ -z ${record[$key]+x} ]] || return 1
     record[$key]=$value
   done <"$session_file"
-  ((${#record[@]} == 12)) || return 1
+  if ((${#record[@]} == 12)) && [[ -z ${record[compositor]+x} && -z ${record[hyprland_instance]+x} ]]; then
+    record[compositor]=plasma
+    record[hyprland_instance]=''
+  fi
+  ((${#record[@]} == 14)) || return 1
   [[ "${record[generation]}" =~ ^[1-9][0-9]*$ ]]
 }
 
@@ -831,10 +884,10 @@ publish_session() {
   local temporary
   next_generation || return 1
   temporary=$(/usr/bin/mktemp --tmpdir="$runtime_root" .session.XXXXXX) || return 1
-  /usr/bin/printf 'session=%s\ngeneration=%s\nuser=%s\nuid=%s\ngid=%s\nhome=%s\nruntime=%s\ndisplay=%s\nxdisplay=%s\nxauthority=%s\ngroups=%s\nrole=%s\n' \
+  /usr/bin/printf 'session=%s\ngeneration=%s\nuser=%s\nuid=%s\ngid=%s\nhome=%s\nruntime=%s\ndisplay=%s\nxdisplay=%s\nxauthority=%s\ngroups=%s\nrole=%s\ncompositor=%s\nhyprland_instance=%s\n' \
     "$candidate_session" "$candidate_generation" "$candidate_user" "$candidate_uid" "$candidate_gid" \
     "$candidate_home" "$candidate_runtime" "$candidate_display" "$candidate_xdisplay" \
-    "$candidate_xauthority" "$candidate_groups" "$candidate_role" >"$temporary" || {
+    "$candidate_xauthority" "$candidate_groups" "$candidate_role" "$candidate_compositor" "$candidate_hyprland_instance" >"$temporary" || {
       /usr/bin/rm -f -- "$temporary"
       return 1
     }
@@ -850,11 +903,13 @@ binding_matches_candidate() {
   [[ "${bound[session]}" == "$candidate_session" && "${bound[user]}" == "$candidate_user" &&
      "${bound[uid]}" == "$candidate_uid" && "${bound[gid]}" == "$candidate_gid" &&
      "${bound[home]}" == "$candidate_home" && "${bound[runtime]}" == "$candidate_runtime" &&
-     "${bound[groups]}" == "$candidate_groups" && "${bound[role]}" == "$candidate_role" ]] || return 1
+     "${bound[groups]}" == "$candidate_groups" && "${bound[role]}" == "$candidate_role" &&
+     "${bound[compositor]}" == "$candidate_compositor" ]] || return 1
   [[ "$comparison" == identity ]] && return 0
   [[ "$comparison" == complete && "${bound[display]}" == "$candidate_display" &&
      "${bound[xdisplay]}" == "$candidate_xdisplay" &&
-     "${bound[xauthority]}" == "$candidate_xauthority" ]]
+     "${bound[xauthority]}" == "$candidate_xauthority" &&
+     "${bound[hyprland_instance]}" == "$candidate_hyprland_instance" ]]
 }
 
 candidate_still_active() {
@@ -863,6 +918,7 @@ candidate_still_active() {
   local expected_runtime=$candidate_runtime expected_groups=$candidate_groups expected_role=$candidate_role
   local expected_display=$candidate_display expected_xdisplay=$candidate_xdisplay
   local expected_xauthority=$candidate_xauthority
+  local expected_compositor=$candidate_compositor expected_hyprland_instance=$candidate_hyprland_instance
   # Do not trust the session ID as a stable identity. Re-run logind/passwd/
   # runtime classification, then obtain display credentials from the current
   # target-user manager immediately before publication or host start.
@@ -873,7 +929,8 @@ candidate_still_active() {
      "$candidate_home" == "$expected_home" && "$candidate_runtime" == "$expected_runtime" &&
      "$candidate_groups" == "$expected_groups" && "$candidate_role" == "$expected_role" &&
      "$candidate_display" == "$expected_display" && "$candidate_xdisplay" == "$expected_xdisplay" &&
-     "$candidate_xauthority" == "$expected_xauthority" ]]
+     "$candidate_xauthority" == "$expected_xauthority" && "$candidate_compositor" == "$expected_compositor" &&
+     "$candidate_hyprland_instance" == "$expected_hyprland_instance" ]]
 }
 
 start_host() {

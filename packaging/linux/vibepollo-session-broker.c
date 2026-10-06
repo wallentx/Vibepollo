@@ -150,6 +150,8 @@ struct session_identity {
   char wayland_display[64];
   char x_display[64];
   char xauthority[PATH_MAX];
+  char compositor[16];
+  char hyprland_instance[193];
   unsigned long generation;
   uid_t uid;
   gid_t gid;
@@ -234,6 +236,20 @@ static bool xauthority_mode_is_safe(mode_t mode) {
   return !(mode & 0077);
 }
 
+static bool is_hyprland(const struct session_identity *identity) {
+  return !strcmp(identity->compositor, "hyprland");
+}
+
+static bool compositor_identity_is_safe(const struct session_identity *identity) {
+  if (!strcmp(identity->compositor, "plasma")) return !identity->hyprland_instance[0];
+  if (!is_hyprland(identity) || strcmp(identity->role, "desktop") ||
+      !safe_text(identity->hyprland_instance, 192, false)) return false;
+  for (const unsigned char *cursor = (const unsigned char *) identity->hyprland_instance; *cursor; ++cursor) {
+    if (!isalnum(*cursor) && *cursor != '_' && *cursor != '-') return false;
+  }
+  return true;
+}
+
 static bool runtime_mode_is_safe(mode_t mode) {
   return (mode & 0777) == 0700;
 }
@@ -249,7 +265,8 @@ static bool xauthority_path_is_confined(const struct session_identity *identity)
 }
 
 static bool validate_xauthority(const struct session_identity *identity) {
-  if (!identity->xauthority[0]) return !strcmp(identity->role, "greeter");
+  if (!identity->xauthority[0]) return !strcmp(identity->role, "greeter") ||
+    (is_hyprland(identity) && compositor_identity_is_safe(identity));
   if (!xauthority_path_is_confined(identity)) return false;
   struct stat attributes;
   return !lstat(identity->xauthority, &attributes) && S_ISREG(attributes.st_mode) &&
@@ -268,6 +285,16 @@ static bool validate_session_endpoints(const struct session_identity *identity) 
       snprintf(bus, sizeof(bus), "%s/bus", identity->runtime) >= (int) sizeof(bus) ||
       lstat(bus, &attributes) || !S_ISSOCK(attributes.st_mode) ||
       attributes.st_uid != identity->uid) return false;
+  if (is_hyprland(identity)) {
+    char endpoint[PATH_MAX];
+    if (!compositor_identity_is_safe(identity) ||
+        snprintf(endpoint, sizeof(endpoint), "%s/hypr", identity->runtime) >= (int) sizeof(endpoint) ||
+        lstat(endpoint, &attributes) || !S_ISDIR(attributes.st_mode) || attributes.st_uid != identity->uid ||
+        snprintf(endpoint, sizeof(endpoint), "%s/hypr/%s", identity->runtime, identity->hyprland_instance) >= (int) sizeof(endpoint) ||
+        lstat(endpoint, &attributes) || !S_ISDIR(attributes.st_mode) || attributes.st_uid != identity->uid ||
+        snprintf(endpoint, sizeof(endpoint), "%s/hypr/%s/.socket.sock", identity->runtime, identity->hyprland_instance) >= (int) sizeof(endpoint) ||
+        lstat(endpoint, &attributes) || !S_ISSOCK(attributes.st_mode) || attributes.st_uid != identity->uid) return false;
+  }
   return true;
 }
 
@@ -294,6 +321,8 @@ static bool groups_match_account(struct session_identity *identity) {
 
 static bool load_identity(struct session_identity *identity, gid_t service_gid,
                           uint64_t expected_generation) {
+  strcpy(identity->compositor, "plasma");
+  identity->hyprland_instance[0] = 0;
   const int fd = open(session_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) return false;
   struct stat attributes;
@@ -312,6 +341,7 @@ static bool load_identity(struct session_identity *identity, gid_t service_gid,
   bool have_session = false, have_generation = false, have_role = false, have_user = false;
   bool have_uid = false, have_gid = false, have_home = false, have_runtime = false;
   bool have_wayland = false, have_xdisplay = false, have_xauthority = false, have_groups = false;
+  bool have_compositor = false, have_hyprland_instance = false;
   char *line = NULL;
   size_t capacity = 0;
   while (getline(&line, &capacity, input) >= 0) {
@@ -357,6 +387,12 @@ static bool load_identity(struct session_identity *identity, gid_t service_gid,
     } else if (!strcmp(line, "xauthority")) {
       if (have_xauthority || !copy_field(identity->xauthority, sizeof(identity->xauthority), separator, true)) goto invalid;
       have_xauthority = true;
+    } else if (!strcmp(line, "compositor")) {
+      if (have_compositor || !copy_field(identity->compositor, sizeof(identity->compositor), separator, false)) goto invalid;
+      have_compositor = true;
+    } else if (!strcmp(line, "hyprland_instance")) {
+      if (have_hyprland_instance || !copy_field(identity->hyprland_instance, sizeof(identity->hyprland_instance), separator, true)) goto invalid;
+      have_hyprland_instance = true;
     } else if (!strcmp(line, "groups")) {
       if (have_groups || !parse_groups(separator, identity)) goto invalid;
       have_groups = true;
@@ -370,7 +406,8 @@ static bool load_identity(struct session_identity *identity, gid_t service_gid,
   if (!have_session || !have_generation || !have_role || !have_user || !have_uid || !have_gid ||
       !have_home || !have_runtime || !have_wayland || !have_xdisplay || !have_xauthority || !have_groups ||
       !safe_identifier(identity->session) ||
-      (strcmp(identity->role, "desktop") && strcmp(identity->role, "greeter"))) {
+      (strcmp(identity->role, "desktop") && strcmp(identity->role, "greeter")) ||
+      have_compositor != have_hyprland_instance || !compositor_identity_is_safe(identity)) {
     errno = EINVAL;
     return false;
   }
@@ -381,7 +418,8 @@ static bool load_identity(struct session_identity *identity, gid_t service_gid,
       snprintf(expected_runtime, sizeof(expected_runtime), "/run/user/%u", identity->uid) >= (int) sizeof(expected_runtime) ||
       strcmp(expected_runtime, identity->runtime) || !numeric_suffix(identity->wayland_display, "wayland-") ||
       (identity->x_display[0] && !valid_xdisplay(identity->x_display)) ||
-      (!strcmp(identity->role, "desktop") && (!identity->x_display[0] || !identity->xauthority[0])) ||
+      (!strcmp(identity->role, "desktop") && (!identity->x_display[0] ||
+        (!is_hyprland(identity) && !identity->xauthority[0]))) ||
       !groups_match_account(identity)) {
     errno = EPERM;
     return false;
@@ -549,6 +587,8 @@ static bool install_session_environment(const struct session_identity *identity)
          !setenv("XDG_DATA_HOME", data_home, 1) && !setenv("XDG_RUNTIME_DIR", identity->runtime, 1) &&
          !setenv("PIPEWIRE_RUNTIME_DIR", identity->runtime, 1) &&
          !setenv("XDG_SESSION_TYPE", "wayland", 1) &&
+         !setenv("XDG_CURRENT_DESKTOP", is_hyprland(identity) ? "Hyprland" : "KDE", 1) &&
+         (!is_hyprland(identity) || !setenv("HYPRLAND_INSTANCE_SIGNATURE", identity->hyprland_instance, 1)) &&
          !setenv("WAYLAND_DISPLAY", identity->wayland_display, 1) &&
          !setenv("DBUS_SESSION_BUS_ADDRESS", bus, 1) &&
          (!identity->x_display[0] || !setenv("DISPLAY", identity->x_display, 1)) &&
@@ -1105,6 +1145,7 @@ static int exec_user_service(const struct session_identity *identity, const char
   char environment_data[PATH_MAX + 32], environment_pipewire[PATH_MAX + 32];
   char environment_bus[PATH_MAX + 48], environment_wayland[96], environment_display[96];
   char environment_xauthority[PATH_MAX + 16];
+  char environment_hyprland[sizeof(identity->hyprland_instance) + 32];
   char environment_path[sizeof(fixed_path) + sizeof("PATH=")];
   if (snprintf(environment_home, sizeof(environment_home), "HOME=%s", identity->home) >= (int) sizeof(environment_home) ||
       snprintf(environment_user, sizeof(environment_user), "USER=%s", identity->user) >= (int) sizeof(environment_user) ||
@@ -1118,7 +1159,10 @@ static int exec_user_service(const struct session_identity *identity, const char
       snprintf(environment_wayland, sizeof(environment_wayland), "WAYLAND_DISPLAY=%s", identity->wayland_display) >= (int) sizeof(environment_wayland) ||
       (identity->x_display[0] && snprintf(environment_display, sizeof(environment_display), "DISPLAY=%s", identity->x_display) >= (int) sizeof(environment_display)) ||
       (identity->xauthority[0] && snprintf(environment_xauthority, sizeof(environment_xauthority), "XAUTHORITY=%s", identity->xauthority) >= (int) sizeof(environment_xauthority))) return 126;
-  char *arguments[72 + 2 * VIBEPOLLO_STREAM_ENVIRONMENT_MAX_ENTRIES];
+  if (is_hyprland(identity) &&
+      snprintf(environment_hyprland, sizeof(environment_hyprland), "HYPRLAND_INSTANCE_SIGNATURE=%s",
+               identity->hyprland_instance) >= (int) sizeof(environment_hyprland)) return 126;
+  char *arguments[80 + 2 * VIBEPOLLO_STREAM_ENVIRONMENT_MAX_ENTRIES];
   if (!vibepollo_stream_environment_is_safe(stream_environment_count, stream_environment)) return 126;
   const unsigned int attempts = recover_steam_launch ? steam_launch_attempts : 1;
   termination_signal = 0;
@@ -1167,6 +1211,16 @@ static int exec_user_service(const struct session_identity *identity, const char
     arguments[index++] = environment_bus;
     arguments[index++] = "--setenv";
     arguments[index++] = "XDG_SESSION_TYPE=wayland";
+    arguments[index++] = "--setenv";
+    arguments[index++] = is_hyprland(identity) ? "XDG_CURRENT_DESKTOP=Hyprland" : "XDG_CURRENT_DESKTOP=KDE";
+    if (is_hyprland(identity)) {
+      arguments[index++] = "--setenv";
+      arguments[index++] = environment_hyprland;
+      if (!identity->xauthority[0]) {
+        arguments[index++] = "--setenv";
+        arguments[index++] = "XAUTHORITY=";
+      }
+    }
     arguments[index++] = "--setenv";
     arguments[index++] = environment_wayland;
     if (wayland_hdr_compatibility) {
@@ -1586,6 +1640,8 @@ static bool identities_match(const struct session_identity *first,
          !strcmp(first->wayland_display, second->wayland_display) &&
          !strcmp(first->x_display, second->x_display) &&
          !strcmp(first->xauthority, second->xauthority) &&
+         !strcmp(first->compositor, second->compositor) &&
+         !strcmp(first->hyprland_instance, second->hyprland_instance) &&
          !memcmp(first->groups, second->groups,
                  first->group_count * sizeof(first->groups[0]));
 }

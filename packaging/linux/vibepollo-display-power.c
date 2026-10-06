@@ -68,7 +68,8 @@ int main(int argc, char **argv) {
       prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) return 126;
   if (!strcmp(argv[1], "wake")) {
     if (setenv("QT_QPA_PLATFORM", "wayland", 1)) return 126;
-    return display_power_wake() && write(STDOUT_FILENO, "R", 1) == 1 ? 0 : 126;
+    const struct display_power_state state = {.hyprland = display_power_is_hyprland()};
+    return display_power_wake(&state) && write(STDOUT_FILENO, "R", 1) == 1 ? 0 : 126;
   }
   if (!strcmp(argv[1], "desktop")) return run_display_power(true);
   if (!strcmp(argv[1], "greeter")) return run_display_power(false);

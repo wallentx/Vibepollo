@@ -28,6 +28,7 @@ readonly maximum_command_manifest_bytes=1048576
 
 desktop_user=''; desktop_uid=''; desktop_gid=''; desktop_home=''
 session_id=''; session_generation=''; session_user=''; session_uid=''; session_gid=''; session_home=''; session_runtime=''; session_display=''; session_xdisplay=''; session_xauthority=''; session_groups=''; session_role=''
+session_compositor=plasma; session_hyprland_instance=''
 authorization_role=''; authorization_directory=''; authorization_command=''
 declare -A application_environment=()
 
@@ -619,13 +620,15 @@ user_exec() {
 load_session() {
   local attributes key value line entry account_name account_uid account_gid account_home
   local -A seen=()
+  session_compositor=plasma
+  session_hyprland_instance=''
   [[ -f "$session_file" && ! -L "$session_file" ]] || fail 'missing session environment'
   attributes=$(/usr/bin/stat -c '%U:%G:%a:%F' -- "$session_file")
   [[ "$attributes" == "root:${service_user}:640:regular file" ]] || fail 'untrusted session environment'
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" == *=* ]] || fail 'malformed session environment'
     key=${line%%=*}; value=${line#*=}
-    [[ "$key" =~ ^(session|generation|user|uid|gid|home|runtime|display|xdisplay|xauthority|groups|role)$ ]] || fail "unknown session key: $key"
+    [[ "$key" =~ ^(session|generation|user|uid|gid|home|runtime|display|xdisplay|xauthority|groups|role|compositor|hyprland_instance)$ ]] || fail "unknown session key: $key"
     [[ -z ${seen[$key]:-} ]] || fail "duplicate session key: $key"
     seen[$key]=1
     case "$key" in
@@ -641,22 +644,35 @@ load_session() {
       xauthority) session_xauthority=$value ;;
       groups) session_groups=$value ;;
       role) session_role=$value ;;
+      compositor) session_compositor=$value ;;
+      hyprland_instance) session_hyprland_instance=$value ;;
     esac
   done <"$session_file"
-  ((${#seen[@]} == 12)) || fail 'incomplete session environment'
+  if ((${#seen[@]} != 14)); then
+    ((${#seen[@]} == 12)) && [[ -z ${seen[compositor]:-} && -z ${seen[hyprland_instance]:-} ]] || fail 'incomplete session environment'
+  fi
   valid_user "$session_user"
   [[ "$session_id" =~ ^[A-Za-z0-9_.-]+$ && "$session_generation" =~ ^[1-9][0-9]*$ &&
      "$session_uid" =~ ^[1-9][0-9]*$ && "$session_gid" =~ ^[1-9][0-9]*$ &&
      "$session_home" == /* && "$session_runtime" == "/run/user/$session_uid" &&
      "$session_display" =~ ^wayland-[0-9]+$ && "$session_groups" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ &&
      "$session_role" =~ ^(desktop|greeter)$ ]] || fail 'invalid session environment'
+  case "$session_compositor" in
+    plasma) [[ -z "$session_hyprland_instance" ]] || fail 'unexpected compositor instance' ;;
+    hyprland) [[ "$session_role" == desktop && ${#session_hyprland_instance} -le 192 &&
+                 "$session_hyprland_instance" =~ ^[A-Za-z0-9_-]+$ ]] || fail 'invalid Hyprland session' ;;
+    *) fail 'unsupported compositor' ;;
+  esac
   entry=$(/usr/bin/getent passwd "$session_uid") || fail 'session account does not exist'
   IFS=: read -r account_name _ account_uid account_gid _ account_home _ <<<"$entry"
   [[ "$account_name" == "$session_user" && "$account_uid" == "$session_uid" &&
      "$account_gid" == "$session_gid" && "$account_home" == "$session_home" ]] || fail 'session account does not match the trusted record'
   if [[ "$session_role" == desktop ]]; then
-    [[ "$session_xdisplay" =~ ^:[0-9]+(\.[0-9]+)?$ && "$session_xauthority" == "$session_runtime"/* &&
-       "$session_xauthority" != */../* && "$session_xauthority" != */.. ]] || fail 'desktop X11 record is invalid'
+    [[ "$session_xdisplay" =~ ^:[0-9]+(\.[0-9]+)?$ ]] || fail 'desktop X11 display is invalid'
+    if [[ "$session_compositor" != hyprland || -n "$session_xauthority" ]]; then
+      [[ "$session_xauthority" == "$session_runtime"/* && "$session_xauthority" != */../* &&
+         "$session_xauthority" != */.. ]] || fail 'desktop X11 record is invalid'
+    fi
   else
     [[ -z "$session_xdisplay" && -z "$session_xauthority" ]] || fail 'greeter record must not contain X11 credentials'
   fi
@@ -818,6 +834,9 @@ run_host() {
     previous_host_logs["$candidate"]=1
   done
   overrides+=("log_path=$host_log_prefix")
+  if [[ "$session_compositor" == hyprland ]]; then
+    overrides+=('virtual_display_mode=disabled')
+  fi
   if [[ "$session_role" == greeter ]]; then
     # The greeter has no interactive fallback, so pin the proven NVENC path on
     # NVIDIA hosts. Other GPUs keep automatic encoder selection (VAAPI/software).
@@ -828,7 +847,7 @@ run_host() {
     overrides+=('min_log_level=info' 'virtual_display_mode=shared' 'virtual_display_layout=exclusive' 'dd_config_revert_on_disconnect=enabled' 'dd_config_revert_delay=0' 'origin_web_ui_allowed=lan' 'session_history_enabled=disabled' 'frame_limiter_enable=false' 'file_apps=/usr/share/vibepollo/prelogin/apps.json'); fi
   environment=("HOME=$machine_profile" "USER=$service_user" "LOGNAME=$service_user" "PATH=/usr/local/sbin:/usr/local/bin:/usr/bin" "LANG=C.UTF-8" "SHELL=/bin/sh" \
     "XDG_CONFIG_HOME=/var/lib" "XDG_RUNTIME_DIR=/run/vibepollo/host" "VIBEPOLLO_MACHINE_HOST=1" \
-    "VIBEPOLLO_SESSION_TYPE=wayland" \
+    "VIBEPOLLO_SESSION_TYPE=wayland" "VIBEPOLLO_SESSION_COMPOSITOR=$session_compositor" \
     "VIBEPOLLO_SESSION_ROLE=$session_role" "VIBEPOLLO_SESSION_USER=$session_user" "VIBEPOLLO_SESSION_UID=$session_uid" "VIBEPOLLO_SESSION_GID=$session_gid" "VIBEPOLLO_SESSION_GROUPS=$session_groups" \
     "VIBEPOLLO_SESSION_ID=$session_id" "VIBEPOLLO_SESSION_GENERATION=$session_generation" "VIBEPOLLO_SESSION_HOME=$session_home")
   request_host_shutdown() {

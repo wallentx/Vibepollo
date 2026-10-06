@@ -37,6 +37,7 @@ NoNewPrivileges=no
 DevicePolicy=closed
 PrivateDevices=yes
 PrivateTmp=yes
+BindReadOnlyPaths=-/tmp/.X11-unix
 PrivateMounts=yes
 ProtectSystem=strict
 ProtectHome=read-only

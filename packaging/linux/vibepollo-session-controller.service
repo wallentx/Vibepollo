@@ -34,6 +34,9 @@ PrivateMounts=yes
 ProtectSystem=strict
 ProtectHome=tmpfs
 BindReadOnlyPaths=/run/user
+# Hyprland's authless Xwayland uses the filesystem socket. Probes still run
+# under the bound desktop UID; the rest of /tmp remains private.
+BindReadOnlyPaths=-/tmp/.X11-unix
 ProtectProc=invisible
 ProtectClock=yes
 ProtectControlGroups=yes

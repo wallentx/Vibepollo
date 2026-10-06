@@ -11,6 +11,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+static bool test_hyprland;
 static int wake_count;
 static int wake_result;
 static int active_inhibitors;
@@ -20,10 +21,10 @@ static bool check_wake_order = true;
 // against a private bus, without changing the developer's desktop or DPMS.
 static int run_command_bounded(const char *path, char *const arguments[],
                                unsigned timeout) {
-  g_assert_cmpstr(path, ==, "/usr/bin/kscreen-doctor");
-  g_assert_cmpstr(arguments[0], ==, "kscreen-doctor");
-  g_assert_cmpstr(arguments[1], ==, "--dpms");
-  g_assert_cmpstr(arguments[2], ==, "on");
+  g_assert_cmpstr(path, ==, test_hyprland ? "/usr/bin/hyprctl" : "/usr/bin/kscreen-doctor");
+  g_assert_cmpstr(arguments[0], ==, test_hyprland ? "hyprctl" : "kscreen-doctor");
+  g_assert_cmpstr(arguments[1], ==, test_hyprland ? "eval" : "--dpms");
+  g_assert_cmpstr(arguments[2], ==, test_hyprland ? "hl.dispatch(hl.dsp.dpms(\"on\"))" : "on");
   g_assert_null(arguments[3]);
   g_assert_cmpuint(timeout, ==, 3000);
   if (check_wake_order) g_assert_cmpint(g_atomic_int_get(&active_inhibitors), >, 0);
@@ -42,6 +43,7 @@ struct provider {
   GMutex mutex;
   GCond condition;
   bool ready;
+  bool require_other_hold;
   guint flags;
   int acquired;
   int released;
@@ -53,16 +55,21 @@ static void power_call(GDBusConnection *bus, const char *sender, const char *pat
                        GVariant *parameters, GDBusMethodInvocation *invocation,
                        gpointer data) {
   (void) bus; (void) sender;
-  g_assert_cmpstr(path, ==, "/org/kde/Solid/PowerManagement/PolicyAgent");
-  g_assert_cmpstr(interface, ==, "org.kde.Solid.PowerManagement.PolicyAgent");
+  g_assert_cmpstr(path, ==, test_hyprland ? "/org/freedesktop/ScreenSaver" :
+    "/org/kde/Solid/PowerManagement/PolicyAgent");
+  g_assert_cmpstr(interface, ==, test_hyprland ? "org.freedesktop.ScreenSaver" :
+    "org.kde.Solid.PowerManagement.PolicyAgent");
   struct provider *provider = data;
-  if (!strcmp(method, "AddInhibition")) {
-    guint policies;
+  if (!strcmp(method, test_hyprland ? "Inhibit" : "AddInhibition")) {
     const char *app, *reason;
-    g_variant_get(parameters, "(u&s&s)", &policies, &app, &reason);
-    // A suspend-only inhibitor still lets DPMS remove capture's scanout.
-    // Require both InterruptSession (1) and ChangeScreenSettings (4).
-    g_assert_cmpuint(policies, ==, 5u);
+    if (test_hyprland) {
+      g_variant_get(parameters, "(&s&s)", &app, &reason);
+    } else {
+      guint policies;
+      g_variant_get(parameters, "(u&s&s)", &policies, &app, &reason);
+      // Require both InterruptSession (1) and ChangeScreenSettings (4).
+      g_assert_cmpuint(policies, ==, 5u);
+    }
     g_assert_cmpstr(app, ==, "Vibepollo");
     g_assert_cmpstr(reason, ==, "Active remote display");
     if (g_atomic_int_get(&provider->reject)) {
@@ -74,7 +81,10 @@ static void power_call(GDBusConnection *bus, const char *sender, const char *pat
     g_atomic_int_inc(&active_inhibitors);
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", cookie));
   } else {
-    g_assert_cmpstr(method, ==, "ReleaseInhibition");
+    g_assert_cmpstr(method, ==, test_hyprland ? "UnInhibit" : "ReleaseInhibition");
+    if (provider->require_other_hold) {
+      g_assert_cmpint(g_atomic_int_get(&active_inhibitors), >=, 2);
+    }
     guint cookie;
     g_variant_get(parameters, "(u)", &cookie);
     g_assert_true(g_hash_table_remove(provider->cookies, GUINT_TO_POINTER(cookie)));
@@ -94,7 +104,12 @@ static gpointer serve_power(gpointer data) {
     provider->address, G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
     G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION, NULL, NULL, NULL);
   g_assert_nonnull(bus);
-  GDBusNodeInfo *info = g_dbus_node_info_new_for_xml(
+  GDBusNodeInfo *info = g_dbus_node_info_new_for_xml(test_hyprland ?
+    "<node><interface name='org.freedesktop.ScreenSaver'>"
+    "<method name='Inhibit'><arg type='s' direction='in'/>"
+    "<arg type='s' direction='in'/><arg type='u' direction='out'/></method>"
+    "<method name='UnInhibit'><arg type='u' direction='in'/></method>"
+    "</interface></node>" :
     "<node><interface name='org.kde.Solid.PowerManagement.PolicyAgent'>"
     "<method name='AddInhibition'><arg type='u' direction='in'/>"
     "<arg type='s' direction='in'/><arg type='s' direction='in'/>"
@@ -103,11 +118,13 @@ static gpointer serve_power(gpointer data) {
     "</interface></node>", NULL);
   const GDBusInterfaceVTable vtable = {.method_call = power_call};
   const guint object = g_dbus_connection_register_object(
-    bus, "/org/kde/Solid/PowerManagement/PolicyAgent", info->interfaces[0], &vtable, provider, NULL, NULL);
+    bus, test_hyprland ? "/org/freedesktop/ScreenSaver" :
+      "/org/kde/Solid/PowerManagement/PolicyAgent", info->interfaces[0], &vtable, provider, NULL, NULL);
   g_assert_cmpuint(object, >, 0);
   GVariant *reply = g_dbus_connection_call_sync(
     bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-    "RequestName", g_variant_new("(su)", "org.kde.Solid.PowerManagement.PolicyAgent", provider->flags),
+    "RequestName", g_variant_new("(su)", test_hyprland ? "org.freedesktop.ScreenSaver" :
+      "org.kde.Solid.PowerManagement.PolicyAgent", provider->flags),
     G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL);
   g_assert_nonnull(reply);
   g_variant_unref(reply);
@@ -164,24 +181,22 @@ static bool read_ready(GSubprocess *process) {
   return read(fd.fd, &token, 1) == 1 && token == 'R';
 }
 
-int main(int argc, char **argv) {
-  if (argc == 2) {
-    check_wake_order = false;
-    wake_result = !strcmp(argv[1], "--wake-failure") ? 124 : 0;
-    return run_display_power(strcmp(argv[1], "--greeter") != 0);
-  }
+static int run_suite(const char *executable) {
+  wake_count = 0;
+  wake_result = 0;
+  check_wake_order = true;
   GTestDBus *test_bus = g_test_dbus_new(G_TEST_DBUS_NONE);
   g_test_dbus_up(test_bus);
   const char *address = g_test_dbus_get_bus_address(test_bus);
   g_setenv("DBUS_SYSTEM_BUS_ADDRESS", address, TRUE);
   GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
   g_assert_nonnull(bus);
-  struct display_power_state state = {.bus = bus, .require_inhibit = true, .wake_pending = true};
+  struct display_power_state state = {.bus = bus, .hyprland = test_hyprland, .require_inhibit = true, .wake_pending = true};
 
   // No desktop inhibitor must not claim readiness or issue a wake.
   g_assert_false(display_power_prepare(&state));
   g_assert_cmpint(wake_count, ==, 0);
-  // A greeter has no PowerDevil but still gets a bounded wake.
+  // A greeter without a power daemon still gets a bounded wake.
   state.require_inhibit = false;
   check_wake_order = false;
   g_assert_true(display_power_prepare(&state));
@@ -189,7 +204,7 @@ int main(int argc, char **argv) {
   check_wake_order = true;
   state.require_inhibit = true;
 
-  struct provider first = {0};
+  struct provider first = {.require_other_hold = true};
   start_provider(&first, address, 1); // Allow a replacement owner.
   g_assert_true(display_power_prepare(&state));
   g_assert_cmpint(wake_count, ==, 2);
@@ -211,20 +226,22 @@ int main(int argc, char **argv) {
   g_assert_false(state.wake_pending);
   g_assert_cmpint(g_atomic_int_get(&first.acquired), ==, 1);
 
-  struct display_power_state second = {.bus = bus, .require_inhibit = true, .wake_pending = true};
+  struct display_power_state second = {.bus = bus, .hyprland = test_hyprland, .require_inhibit = true, .wake_pending = true};
   g_assert_true(display_power_prepare(&second));
   g_assert_cmpint(g_atomic_int_get(&active_inhibitors), ==, 2);
   display_power_release(&second);
   g_assert_cmpint(g_atomic_int_get(&active_inhibitors), ==, 1);
 
   // A service restart gets a fresh cookie; failure keeps the old hold until
-  // the replacement can acquire one. ReleaseInhibition targets the old unique owner.
+  // the replacement can acquire one. Release targets the old unique owner.
   struct provider replacement = {.reject = 1};
   start_provider(&replacement, address, 6);
+  const int wakes_before_replacement = wake_count;
   g_assert_false(display_power_prepare(&state));
+  g_assert_cmpint(wake_count, ==, wakes_before_replacement);
   g_assert_cmpint(g_atomic_int_get(&first.released), ==, 1);
   g_assert_cmpint(g_atomic_int_get(&active_inhibitors), ==, 1);
-  struct display_power_state greeter = {.bus = bus, .wake_pending = true};
+  struct display_power_state greeter = {.bus = bus, .hyprland = test_hyprland, .wake_pending = true};
   g_assert_true(display_power_prepare(&greeter)); // Owner rejects inhibition.
   g_assert_false(greeter.inhibited);
   g_atomic_int_set(&replacement.reject, 0);
@@ -237,8 +254,8 @@ int main(int argc, char **argv) {
 
   // Exercise the actual readiness pipe and signal-driven lease lifetime.
   g_atomic_int_set(&replacement.reject, 1);
-  GSubprocess *worker = start_worker(argv[0], "--worker");
-  g_usleep(200000); // Simulate PowerDevil still settling on the first attempt.
+  GSubprocess *worker = start_worker(executable, "--worker");
+  g_usleep(200000); // The power daemon is still settling on the first attempt.
   g_atomic_int_set(&replacement.reject, 0);
   g_assert_true(read_ready(worker));
   g_assert_cmpint(g_atomic_int_get(&active_inhibitors), ==, 1);
@@ -265,7 +282,7 @@ int main(int argc, char **argv) {
   sigemptyset(&blocked);
   sigaddset(&blocked, SIGALRM);
   g_assert_cmpint(sigprocmask(SIG_BLOCK, &blocked, &previous), ==, 0);
-  worker = g_subprocess_launcher_spawn(launcher, NULL, argv[0], "--worker", NULL);
+  worker = g_subprocess_launcher_spawn(launcher, NULL, executable, "--worker", NULL);
   g_assert_cmpint(sigprocmask(SIG_SETMASK, &previous, NULL), ==, 0);
   g_assert_nonnull(worker);
   g_assert_false(read_ready(worker));
@@ -278,7 +295,7 @@ int main(int argc, char **argv) {
   unlink(stalled.sun_path);
   rmdir(temporary);
   g_free(temporary);
-  worker = start_worker(argv[0], "--wake-failure");
+  worker = start_worker(executable, "--wake-failure");
   g_assert_false(read_ready(worker));
   g_assert_true(g_subprocess_wait(worker, NULL, NULL));
   g_assert_cmpint(g_subprocess_get_exit_status(worker), ==, 126);
@@ -287,7 +304,7 @@ int main(int argc, char **argv) {
 
   join_provider(&replacement);
   join_provider(&first);
-  worker = start_worker(argv[0], "--greeter");
+  worker = start_worker(executable, "--greeter");
   g_assert_true(read_ready(worker));
   g_subprocess_send_signal(worker, SIGTERM);
   g_assert_true(g_subprocess_wait_check(worker, NULL, NULL));
@@ -296,5 +313,33 @@ int main(int argc, char **argv) {
   g_object_unref(bus);
   g_test_dbus_down(test_bus);
   g_object_unref(test_bus);
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  test_hyprland = display_power_is_hyprland();
+  if (argc == 2) {
+    if (!strcmp(argv[1], "--suite")) return run_suite(argv[0]);
+    check_wake_order = false;
+    wake_result = !strcmp(argv[1], "--wake-failure") ? 124 : 0;
+    return run_display_power(strcmp(argv[1], "--greeter") != 0);
+  }
+  g_setenv("XDG_CURRENT_DESKTOP", "Hyprland:KDE", TRUE);
+  g_assert_false(display_power_is_hyprland());
+  g_setenv("XDG_CURRENT_DESKTOP", "hyprland", TRUE);
+  g_assert_false(display_power_is_hyprland());
+  g_unsetenv("XDG_CURRENT_DESKTOP");
+  g_assert_false(display_power_is_hyprland());
+  // Each suite gets fresh GLib bus caches and a separate private bus.
+  const char *desktops[] = {"KDE", "Hyprland"};
+  for (guint i = 0; i < G_N_ELEMENTS(desktops); ++i) {
+    GSubprocessLauncher *launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_NONE);
+    g_subprocess_launcher_setenv(launcher, "XDG_CURRENT_DESKTOP", desktops[i], TRUE);
+    GSubprocess *suite = g_subprocess_launcher_spawn(launcher, NULL, argv[0], "--suite", NULL);
+    g_assert_nonnull(suite);
+    g_assert_true(g_subprocess_wait_check(suite, NULL, NULL));
+    g_object_unref(suite);
+    g_object_unref(launcher);
+  }
   return 0;
 }

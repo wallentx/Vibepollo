@@ -11,6 +11,7 @@ controller_stop_host_definition=$(declare -f stop_host)
 controller_stop_brokers_definition=$(declare -f stop_broker_instances)
 controller_stop_apps_definition=$(declare -f stop_bound_session_apps)
 controller_remove_record_definition=$(declare -f remove_session_record)
+controller_binding_definition=$(declare -f binding_matches_candidate)
 
 declare -a events=()
 mock_policy=1
@@ -586,6 +587,41 @@ for unsupported in plasmalogin-greeter sddm-greeter gdm-password lightdm login s
     fail_test "desktop login service '$unsupported' was accepted"
   fi
 done
+
+hyprland_session_supported ly Hyprland || fail_test 'Hyprland under ly was rejected'
+for unsupported in KDE GNOME hyprland ''; do
+  if hyprland_session_supported ly "$unsupported"; then
+    fail_test 'a non-Hyprland desktop was admitted through ly'
+  fi
+done
+if hyprland_session_supported sshd Hyprland; then
+  fail_test 'a remote Hyprland session was admitted'
+fi
+valid_hyprland_instance abcdef_123_456 || fail_test 'a valid compositor instance was rejected'
+for instance in '' .. ../other first/second bad.instance 'bad instance'; do
+  if valid_hyprland_instance "$instance"; then
+    fail_test 'an unsafe compositor instance was admitted'
+  fi
+done
+(
+  eval "$controller_binding_definition"
+  candidate_session=c1 candidate_user=desktop candidate_uid=1000 candidate_gid=1000
+  candidate_home=/home/desktop candidate_runtime=/run/user/1000 candidate_groups=1000 candidate_role=desktop
+  candidate_compositor=hyprland candidate_hyprland_instance=abcdef_123_456
+  candidate_display=wayland-1 candidate_xdisplay=:0 candidate_xauthority=''
+  record_compositor=hyprland record_instance=abcdef_123_456
+  read_session_record() {
+    local -n record=$1
+    record=([session]=c1 [user]=desktop [uid]=1000 [gid]=1000 [home]=/home/desktop
+      [runtime]=/run/user/1000 [groups]=1000 [role]=desktop [compositor]="$record_compositor"
+      [hyprland_instance]="$record_instance" [display]=wayland-1 [xdisplay]=:0 [xauthority]='')
+  }
+  binding_matches_candidate complete || fail_test 'the current Hyprland binding was rejected'
+  record_instance=abcdef_123_457
+  if binding_matches_candidate complete; then fail_test 'a replacement compositor retained the old binding'; fi
+  record_compositor=plasma
+  if binding_matches_candidate identity; then fail_test 'a different compositor retained the old identity'; fi
+)
 
 # Batched broker observations retain exact-unit, PID and cgroup proof while
 # reducing a pass over many old failed units to one systemctl invocation.

@@ -12,6 +12,7 @@ struct display_power_state {
   GMainLoop *loop;
   char *owner;
   guint cookie;
+  bool hyprland;
   bool inhibited;
   bool failed;
   bool retrying;
@@ -27,7 +28,25 @@ static const char power_interface[] = "org.kde.Solid.PowerManagement.PolicyAgent
 // Capture also needs ChangeScreenSettings (4) to prevent idle DPMS shutdown.
 static const guint power_inhibition_policies = 1u | 4u;
 
-static bool display_power_wake(void) {
+static bool display_power_is_hyprland(void) {
+  return !g_strcmp0(g_getenv("XDG_CURRENT_DESKTOP"), "Hyprland");
+}
+
+static const char *display_power_path(const struct display_power_state *state) {
+  return state->hyprland ? "/org/freedesktop/ScreenSaver" : power_path;
+}
+
+static const char *display_power_interface(const struct display_power_state *state) {
+  return state->hyprland ? "org.freedesktop.ScreenSaver" : power_interface;
+}
+
+static bool display_power_wake(const struct display_power_state *state) {
+  if (state->hyprland) {
+    char *const arguments[] = {
+      "hyprctl", "eval", "hl.dispatch(hl.dsp.dpms(\"on\"))", NULL
+    };
+    return run_command_bounded("/usr/bin/hyprctl", arguments, 3000) == 0;
+  }
   char *const arguments[] = {
     "kscreen-doctor", "--dpms", "on", NULL
   };
@@ -39,7 +58,8 @@ static bool display_power_wake(void) {
 static void display_power_release(struct display_power_state *state) {
   if (state->inhibited) {
     GVariant *reply = g_dbus_connection_call_sync(
-      state->bus, state->owner, power_path, power_interface, "ReleaseInhibition",
+      state->bus, state->owner, display_power_path(state), display_power_interface(state),
+      state->hyprland ? "UnInhibit" : "ReleaseInhibition",
       g_variant_new("(u)", state->cookie), NULL,
       G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, NULL);
     if (reply) g_variant_unref(reply);
@@ -52,11 +72,12 @@ static bool display_power_inhibit(struct display_power_state *state) {
   GError *error = NULL;
   GVariant *reply = g_dbus_connection_call_sync(
     state->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
-    "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)", power_service),
+    "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)",
+      state->hyprland ? "org.freedesktop.ScreenSaver" : power_service),
     G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 1500, NULL, &error);
   if (!reply) {
     g_clear_error(&error);
-    // The Wayland greeter may not run PowerDevil. It still needs a DPMS wake,
+    // The Wayland greeter may not run a power daemon. It still needs a DPMS wake,
     // but must remain reachable without a desktop power-management daemon.
     return !state->require_inhibit;
   }
@@ -71,8 +92,10 @@ static bool display_power_inhibit(struct display_power_state *state) {
   // Address the unique owner, so a replacement service cannot receive an old
   // cookie or impersonate a successful acquisition in the same transaction.
   reply = g_dbus_connection_call_sync(
-    state->bus, new_owner, power_path, power_interface, "AddInhibition",
-    g_variant_new("(uss)", power_inhibition_policies, "Vibepollo", "Active remote display"),
+    state->bus, new_owner, display_power_path(state), display_power_interface(state),
+    state->hyprland ? "Inhibit" : "AddInhibition",
+    state->hyprland ? g_variant_new("(ss)", "Vibepollo", "Active remote display") :
+      g_variant_new("(uss)", power_inhibition_policies, "Vibepollo", "Active remote display"),
     G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1500, NULL, &error);
   if (!reply) {
     g_clear_error(&error);
@@ -80,7 +103,7 @@ static bool display_power_inhibit(struct display_power_state *state) {
     return !state->require_inhibit;
   }
   // Acquire the replacement before releasing the previous owner. Never send
-  // the previous service's cookie to the new PowerDevil instance.
+  // the previous service's cookie to the new power daemon instance.
   display_power_release(state);
   state->owner = new_owner;
   g_variant_get(reply, "(u)", &state->cookie);
@@ -92,7 +115,7 @@ static bool display_power_inhibit(struct display_power_state *state) {
 
 static bool display_power_prepare(struct display_power_state *state) {
   if (!display_power_inhibit(state) ||
-      (state->wake_pending && !display_power_wake())) {
+      (state->wake_pending && !display_power_wake(state))) {
     return false;
   }
   state->wake_pending = false;
@@ -102,7 +125,7 @@ static bool display_power_prepare(struct display_power_state *state) {
 static gboolean display_power_refresh(gpointer data) {
   struct display_power_state *state = data;
   const bool ready = display_power_prepare(state);
-  // Resume and PowerDevil restarts can temporarily make the services
+  // Resume and power daemon restarts can temporarily make the services
   // unavailable. Keep the lease, and retry while this stream still owns it.
   if (!ready && !state->retrying) {
     fprintf(stderr, "vibepollo-session-broker: retrying display power recovery\n");
@@ -146,7 +169,10 @@ static int run_display_power(bool require_inhibit) {
   // The controller binds Wayland sessions only. Do not let Qt choose Xwayland
   // (or an offscreen backend) for the DPMS protocol after a desktop resume.
   if (setenv("QT_QPA_PLATFORM", "wayland", 1)) return 126;
-  struct display_power_state state = {.wake_pending = true, .require_inhibit = require_inhibit};
+  struct display_power_state state = {
+    .hyprland = display_power_is_hyprland(),
+    .wake_pending = true, .require_inhibit = require_inhibit
+  };
   GError *error = NULL;
   state.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
   if (!state.bus) {

@@ -189,6 +189,9 @@ else()
                 DESTINATION "${VIBESHINE_PRIVILEGED_LIBEXEC_INSTALL_DIR}"
                 RENAME "vibepollo-host"
                 PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE)
+        # PROGRAMS does not apply the RPATH cleanup performed by TARGETS.
+        # The privileged copy must never load libraries from a build cache.
+        install(CODE "file(RPATH_REMOVE FILE \"\$ENV{DESTDIR}${VIBESHINE_PRIVILEGED_LIBEXEC_INSTALL_DIR}/vibepollo-host\")")
         install(TARGETS vibeshine_vkms_peercred
                 RUNTIME DESTINATION "${VIBESHINE_PRIVILEGED_LIBEXEC_INSTALL_DIR}")
         install(FILES "${LIBVIRTUALDISPLAY_LINUX_ROOT}/packaging/vibeshine-vkms.sysusers"

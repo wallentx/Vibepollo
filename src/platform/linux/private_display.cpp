@@ -38,6 +38,7 @@
 #include <nlohmann/json.hpp>
 #include <set>
 #include <shared_mutex>
+#include <string_view>
 #include <sys/stat.h>
 #include <thread>
 #include <virtual_display/driver/linux_control_client.h>
@@ -1365,6 +1366,12 @@ namespace platf::linux_private_display {
     const remote_display_topology::mode_t &mode
   ) {
     (void) mode;
+    // Remote Monitor bypasses the physical-only display backend.
+    const auto compositor = std::getenv("VIBEPOLLO_SESSION_COMPOSITOR");
+    if (compositor && std::string_view {compositor} == "hyprland") {
+      BOOST_LOG(error) << "Linux Remote Monitor: independent virtual displays are unavailable on Hyprland.";
+      return false;
+    }
     if (client_uuid.empty()) {
       return false;
     }
