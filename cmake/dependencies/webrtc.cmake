@@ -1,4 +1,4 @@
-# libwebrtc dependency (Windows only)
+# libwebrtc dependency
 
 if(NOT SUNSHINE_ENABLE_WEBRTC)
     return()
@@ -9,8 +9,9 @@ endif()
 #   1. Explicit -DWEBRTC_ROOT=...        (user override)
 #   2. $ENV{VIBEPOLLO_DEPS_DIR}/libwebrtc/out
 #   3. $ENV{VIBESHINE_DEPS_DIR}/libwebrtc/out           (legacy override)
-#   4. $ENV{LOCALAPPDATA}/Vibepollo/deps/libwebrtc/out  (Windows default)
-#   5. ${CMAKE_BINARY_DIR}/libwebrtc                    (legacy fallback)
+#   4. $ENV{XDG_CACHE_HOME}/Vibepollo/deps/libwebrtc/out (Linux default)
+#   5. $ENV{LOCALAPPDATA}/Vibepollo/deps/libwebrtc/out  (Windows default)
+#   6. ${CMAKE_BINARY_DIR}/libwebrtc                    (legacy fallback)
 # build_mingw_webrtc.ps1 uses the same defaults so a single rebuild populates
 # the location every Vibepollo build dir / worktree on this machine sees.
 set(_vibepollo_default_webrtc_root "")
@@ -18,6 +19,10 @@ if(DEFINED ENV{VIBEPOLLO_DEPS_DIR} AND NOT "$ENV{VIBEPOLLO_DEPS_DIR}" STREQUAL "
     set(_vibepollo_default_webrtc_root "$ENV{VIBEPOLLO_DEPS_DIR}/libwebrtc/out")
 elseif(DEFINED ENV{VIBESHINE_DEPS_DIR} AND NOT "$ENV{VIBESHINE_DEPS_DIR}" STREQUAL "")
     set(_vibepollo_default_webrtc_root "$ENV{VIBESHINE_DEPS_DIR}/libwebrtc/out")
+elseif(UNIX AND NOT APPLE AND DEFINED ENV{XDG_CACHE_HOME} AND NOT "$ENV{XDG_CACHE_HOME}" STREQUAL "")
+    set(_vibepollo_default_webrtc_root "$ENV{XDG_CACHE_HOME}/Vibepollo/deps/libwebrtc/out")
+elseif(UNIX AND NOT APPLE AND DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+    set(_vibepollo_default_webrtc_root "$ENV{HOME}/.cache/Vibepollo/deps/libwebrtc/out")
 elseif(WIN32 AND DEFINED ENV{LOCALAPPDATA} AND NOT "$ENV{LOCALAPPDATA}" STREQUAL "")
     set(_vibepollo_default_webrtc_root "$ENV{LOCALAPPDATA}/Vibepollo/deps/libwebrtc/out")
 endif()
@@ -102,13 +107,19 @@ endif()
 if(NOT WEBRTC_INCLUDE_DIR)
     if(WEBRTC_ROOT)
         if(EXISTS "${WEBRTC_ROOT}/include/libwebrtc.h")
-            set(WEBRTC_INCLUDE_DIR "${WEBRTC_ROOT}/include")
+            set(WEBRTC_INCLUDE_DIR "${WEBRTC_ROOT}/include"
+                    CACHE PATH "Path to libwebrtc include directory." FORCE)
+        else()
+            unset(WEBRTC_INCLUDE_DIR CACHE)
+            unset(WEBRTC_INCLUDE_DIR)
+            find_path(WEBRTC_INCLUDE_DIR
+                    NAMES webrtc/api/peer_connection_interface.h api/peer_connection_interface.h libwebrtc.h
+                    PATHS "${WEBRTC_ROOT}"
+                    PATH_SUFFIXES include)
         endif()
-        find_path(WEBRTC_INCLUDE_DIR
-                NAMES webrtc/api/peer_connection_interface.h api/peer_connection_interface.h libwebrtc.h
-                PATHS "${WEBRTC_ROOT}"
-                PATH_SUFFIXES include)
     else()
+        unset(WEBRTC_INCLUDE_DIR CACHE)
+        unset(WEBRTC_INCLUDE_DIR)
         find_path(WEBRTC_INCLUDE_DIR
                 NAMES webrtc/api/peer_connection_interface.h api/peer_connection_interface.h libwebrtc.h)
     endif()
@@ -149,10 +160,23 @@ if(NOT WEBRTC_LIBRARY)
                         PATH_SUFFIXES lib)
             endif()
         else()
-            find_library(WEBRTC_LIBRARY
-                    NAMES webrtc libwebrtc
-                    PATHS "${WEBRTC_ROOT}"
-                    PATH_SUFFIXES lib)
+            foreach(candidate
+                    "${WEBRTC_ROOT}/lib/libwebrtc.so"
+                    "${WEBRTC_ROOT}/lib/libwebrtc.a")
+                if(EXISTS "${candidate}")
+                    set(WEBRTC_LIBRARY "${candidate}"
+                            CACHE FILEPATH "Path to libwebrtc library file." FORCE)
+                    break()
+                endif()
+            endforeach()
+            if(NOT WEBRTC_LIBRARY)
+                unset(WEBRTC_LIBRARY CACHE)
+                unset(WEBRTC_LIBRARY)
+                find_library(WEBRTC_LIBRARY
+                        NAMES webrtc libwebrtc
+                        PATHS "${WEBRTC_ROOT}"
+                        PATH_SUFFIXES lib)
+            endif()
         endif()
     else()
         if(WIN32)
@@ -164,6 +188,8 @@ if(NOT WEBRTC_LIBRARY)
                         NAMES libwebrtc.dll.lib libwebrtc.lib webrtc.lib)
             endif()
         else()
+            unset(WEBRTC_LIBRARY CACHE)
+            unset(WEBRTC_LIBRARY)
             find_library(WEBRTC_LIBRARY
                     NAMES webrtc libwebrtc)
         endif()
@@ -190,6 +216,7 @@ if(NOT WEBRTC_INCLUDE_DIR OR NOT WEBRTC_LIBRARY)
 endif()
 
 set(WEBRTC_RUNTIME_DLL "")
+set(WEBRTC_RUNTIME_LIBRARY "")
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     if(WEBRTC_ROOT AND NOT WEBRTC_RUNTIME_DLL)
         if(EXISTS "${WEBRTC_ROOT}/lib/libwebrtc.dll")
@@ -239,6 +266,10 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 
         set(WEBRTC_LIBRARY "${WEBRTC_IMPORT_LIB}")
     endif()
+endif()
+
+if(UNIX AND NOT APPLE AND WEBRTC_LIBRARY MATCHES "\\.so(\\.[0-9]+)*$")
+    set(WEBRTC_RUNTIME_LIBRARY "${WEBRTC_LIBRARY}")
 endif()
 
 list(APPEND WEBRTC_INCLUDE_DIRS "${WEBRTC_INCLUDE_DIR}")

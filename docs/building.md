@@ -213,13 +213,29 @@ fi
 pacman -S "${dependencies[@]}"
 ```
 
-##### WebRTC (optional, Windows only)
+##### WebRTC (optional)
 Sunshine can link against the libwebrtc C++ wrapper when `SUNSHINE_ENABLE_WEBRTC=ON`. The wrapper source is vendored as
 the `third-party/libwebrtc` submodule, but you must build WebRTC separately and provide a staging directory that
-contains `include/` and `lib/` (e.g., `libwebrtc.dll` and its import library). We use the `third-party/depot_tools`
+contains `include/` and `lib/` (for example, `libwebrtc.so` on Linux or `libwebrtc.dll` and its import library on Windows). We use the `third-party/depot_tools`
 submodule for `gclient`/`gn`.
 
-###### Quickstart (recommended)
+###### Linux quickstart
+
+The Linux helper synchronizes the pinned WebRTC branch, builds the native wrapper, and stages it in the shared user
+cache discovered by CMake:
+
+```bash
+./scripts/build_linux_webrtc.sh
+cmake -S . -B build
+cmake --build build
+```
+
+WebRTC is enabled by default on Linux. Set `VIBEPOLLO_DEPS_DIR` to relocate the shared dependency cache or
+`WEBRTC_BUILD_JOBS` to limit parallelism. The installed Linux package includes `libwebrtc.so` automatically. Pass
+`-DSUNSHINE_ENABLE_WEBRTC=OFF` only when intentionally building without WebRTC.
+
+###### Windows quickstart
+
 A helper script automates the full depot_tools / gclient / gn / ninja flow:
 
 ```powershell
@@ -248,7 +264,7 @@ script or CMake.
 For finer control the script accepts overrides via `-BuildDir`/`-OutDir` parameters or the legacy
 `WEBRTC_BUILD_DIR` / `WEBRTC_OUT_DIR` env vars (these still take precedence if set).
 
-###### Manual build (advanced / first-time porting)
+###### Windows manual build
 
 If you cannot use the helper script, the underlying steps are:
 

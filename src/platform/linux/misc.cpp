@@ -45,6 +45,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#if defined(SUNSHINE_TRAY) && SUNSHINE_TRAY >= 1
+  #include <gtk/gtk.h>
+#endif
+
 #ifdef SUNSHINE_BUILD_DRM
   #include <dirent.h>
   #include <xf86drm.h>
@@ -545,6 +549,21 @@ namespace platf {
    * @param url The url to open.
    */
   void open_url(const std::string &url) {
+#if defined(SUNSHINE_TRAY) && SUNSHINE_TRAY >= 1
+    if (g_main_context_is_owner(g_main_context_default())) {
+      GError *error = nullptr;
+      const auto timestamp = gtk_get_current_event_time();
+      if (gtk_show_uri_on_window(nullptr, url.c_str(), timestamp, &error)) {
+        BOOST_LOG(info) << "Opened url ["sv << url << "]"sv;
+        return;
+      }
+
+      BOOST_LOG(warning) << "Couldn't open url ["sv << url << "] with GTK: "sv
+                         << (error ? error->message : "unknown error");
+      g_clear_error(&error);
+    }
+#endif
+
     // set working dir to user home directory
     auto working_dir = boost::filesystem::path(std::getenv("HOME"));
     std::string cmd = R"(xdg-open ")" + url + R"(")";
