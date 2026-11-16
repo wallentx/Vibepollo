@@ -1,59 +1,87 @@
-# Hyprland physical-display streaming
+# Experimental Hyprland physical-display host
 
-The Linux compatibility branch supports an active Hyprland Wayland session
-started by `ly` through UWSM. The session controller requires
-`wayland-session@hyprland.desktop.target`,
-`wayland-wm@hyprland.desktop.service`, and `graphical-session.target` to be
-active. The user manager must publish `WAYLAND_DISPLAY`, `DISPLAY`, and
-`HYPRLAND_INSTANCE_SIGNATURE`.
+The native machine package has an administrator opt-in for a limited Hyprland
+session. KDE/Plasma remains the default. This backend has component coverage;
+live Hyprland/NVIDIA capture, application, login and suspend validation is still
+required before claiming this platform works on a particular machine.
 
-The machine service captures the existing physical display through KMS.
-Virtual displays, Remote Monitor creation, and login-screen streaming are
-unavailable in this mode. Physical monitor enumeration in the Web UI is
-unavailable; automatic capture or an existing physical output selection is
-used. Multiple-monitor offsets and fractional scaling require additional
-validation.
+Use a Hyprland session started by SDDM through **Hyprland (uwsm-managed)**,
+using UWSM's `hyprland.desktop` entry. The controller still requires the chosen
+local desktop account, active Wayland logind session and seat0. UWSM must publish
+its current `WAYLAND_DISPLAY` to the user manager and finish starting
+`wayland-wm@hyprland.desktop.service`,
+`wayland-session@hyprland.desktop.target` and `graphical-session.target`.
+The controller observes these units and probes the validated user-owned socket.
+Its peer UID must match the selected user, and its process must belong to the
+fixed UWSM unit's cgroup, including the packaged start-hyprland watchdog;
+it does not start a compositor or import arbitrary environment files. Each UWSM
+compositor invocation, peer PID and process start time are bound to the trusted machine session record, so a
+watchdog child restart or unit restart replaces the host generation even if the socket name repeats.
+An observed stopped unit or changed invocation revokes the previous generation
+even when its replacement socket is unavailable. Failed metadata queries alone
+retain suspend-transition retry behavior and never admit an unverified replacement.
+See [Hyprland's systemd startup guide](https://wiki.hypr.land/Useful-Utilities/Systemd-start/).
 
-Hypridle must provide `org.freedesktop.ScreenSaver` inhibition on the user
-bus. The capability-free power helper acquires that inhibitor and wakes the
-bound Hyprland instance through `hyprctl`. The broker validates the instance
-socket after dropping to the selected user's identity. Hyprland can omit
-`XAUTHORITY`; the controller still verifies that its local Xwayland display
-is reachable as the session user. Plasma retains its private authority-file
-requirement.
+Install the native package manually following [the Linux installation guide](install.md#install-manually).
+The recommended installer script retains its Plasma requirements. After package
+configuration selects the intended desktop account, an administrator can add
+this setting to the existing root-owned mode 0600 `/etc/vibepollo/machine.conf`:
 
-## Installation
-
-Use a locally built Arch package containing these compatibility changes.
-The release download installer targets the KDE deployment. Configure local
-builds with `SUNSHINE_EXECUTABLE_PATH=/usr/bin/vibepollo` and
-`SUNSHINE_ASSETS_DIR=share/vibepollo`. The package must include the matching
-Linux `libwebrtc.so` when WebRTC is enabled.
-
-Keep the KDE virtual-display pool disabled on a Hyprland-only host before
-installing the package:
-
-```bash
-sudo systemctl mask vibeshine-vkms.service vibeshine-drm-setup.service
+```ini
+desktop_backend=hyprland-kms
 ```
 
-The package can install virtual-display driver files, but physical Hyprland
-capture does not use them. Unmask these units before switching to the KDE
-managed-display deployment.
+Keep the existing `desktop_user` line. The package's configure/upgrade path
+preserves this selection; omitting the setting selects `kwin`. A policy or
+session change stops the host and its applications before binding a new
+generation, interrupting active streams. The Plasma Login greeter continues to
+use the KWin backend, independent of the desktop policy. SDDM greeter streaming
+is not provided.
 
-The package migrates the legacy user profile to `/var/lib/vibepollo` and
-enables `vibepollo-session-controller.service`. Retire the old user service
-after saving a rollback package and profile backup. Stopping that service
-can also terminate applications in its cgroup; preserve unrelated desktop
-applications before the transition.
+The supported slice captures an already enabled **physical SDR output through
+KMS**, with audio/input and administrator-authorized native Wayland application
+commands. Set `output_name` to an exact physical connector name from display
+enumeration before streaming; empty and numeric output aliases are rejected.
+Capture checks that selected connector's current DRM `HDR_OUTPUT_METADATA`
+state at initialization and before delivering frames. A zero blob or valid
+static metadata with SDR EOTF is required; missing/unreadable metadata,
+unsupported metadata types and every HDR EOTF fail closed. Display enumeration
+alone does not certify SDR state. The user must disable HDR in Hyprland on that
+connector; the host does not change its color pipeline or perform HDR-to-SDR
+conversion. Connectors without a readable standard HDR property are excluded
+from this experimental capture policy. The backend forces KMS and disables the global
+private-display default for that host launch. Saved Plasma output topology is
+not applied. Existing managed kernel outputs and configured reserved outputs
+are excluded from capture selection.
 
-Inspect the replacement with:
+These operations are explicitly unsupported: wlr capture in the machine-service
+account, private/Remote Monitor creation, display modes/layout/scale/HDR changes,
+DPMS wake/power control, touchscreen mapping and KWin application focus. Physical
+outputs must be enabled by the desktop user. HDR or private-output stream requests
+fail with an explanation. The backend advertises no independent-output capability.
+KScreen and managed-connector operations are fenced even if called outside the
+normal backend route.
 
-```bash
-systemctl status vibepollo-session-controller.service vibepollo.service
-sudo journalctl -u vibepollo.service -b --no-pager
-```
+Hyprland's Xwayland runs without an Xauthority file, and the controller's
+private `/tmp` cannot see `/tmp/.X11-unix`. The controller treats UWSM's
+published `DISPLAY` as a candidate only: it connects to that socket through the
+bound compositor's `/proc/PID/root` and records `xdisplay=:N` only when the
+listening peer is the compositor PID and start time already bound to the
+session. `XAUTHORITY` is never imported, and inherited user-manager values are
+removed from launched services; only the recorded display is set. A retryable
+probe failure keeps a display already bound to the same compositor, so it does
+not restart the host. Without a bound display the session stays Wayland-only.
 
-Successful startup requires encoder discovery and a Web UI listener owned
-by the current machine host. A client stream is still needed to verify
-capture, input, and audio end to end.
+With a bound display, Steam/Big Picture, Steam-direct and Lutris launches use the
+same broker operations as KDE; Proton games then run on Hyprland's Xwayland. HDR
+compatibility launches and the external Proton stream policy remain
+unsupported.
+
+Before promoting support, test physical KMS/NVENC or VAAPI capture, audio/input,
+a native Wayland application, logout/login and greeter transitions, compositor
+restart with a reused socket, suspend/resume and upgrade cleanup. Verify that
+private/HDR requests fail without changing outputs, that Steam/Lutris launches
+are refused without a bound Xwayland display, that old compositor
+applications are cancelled, and that switching the policy back to `kwin`
+preserves the existing Plasma behavior. No live compositor test is implied by
+the component fixtures.

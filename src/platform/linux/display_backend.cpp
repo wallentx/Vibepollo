@@ -3,14 +3,14 @@
  * @brief Linux display backend selection and managed desktop implementation.
  */
 #include "display_backend.h"
-#include "display_power.h"
 #include "private_display.h"
+#include "session_backend.h"
+#include "src/platform/common.h"
 #include "src/rtsp.h"
 
-#include <cstdlib>
 #include <display_device/json.h>
-#include <string_view>
 #include <utility>
+#include <algorithm>
 
 #ifdef SUNSHINE_BUILD_GAMESCOPE
   #include "gamescopegrab.h"
@@ -18,30 +18,38 @@
 
 namespace platf::linux_display {
   namespace {
+    // An explicit capability subset: capture existing physical SDR scanout.
+    // No KScreen, connector lease, topology restoration or X11 authority is
+    // inferred from the presence of a running Hyprland process.
     class hyprland_backend_t final : public backend_t {
+      static bool physical_output(const std::string &name) {
+        const auto separator = name.find_last_of(':');
+        const auto connector = separator == std::string::npos ? name : name.substr(separator + 1);
+        return !linux_private_display::is_kernel_output(connector) &&
+          std::ranges::find(config::video.dd.virtual_display_outputs, connector) == config::video.dd.virtual_display_outputs.end();
+      }
+
     public:
       prepared_display_t prepare_session(rtsp_stream::launch_session_t &session, bool, bool) const override {
-        const bool client_requests_virtual = session.client_virtual_display_override.value_or(session.client_requests_virtual_display);
-        const bool explicit_physical = session.client_virtual_display_override && !*session.client_virtual_display_override;
-        const bool mode_requests_virtual = session.virtual_display_mode_override &&
-                                           *session.virtual_display_mode_override != config::video_t::virtual_display_mode_e::disabled;
-        bool requests_virtual = session.virtual_display || client_requests_virtual || (mode_requests_virtual && !explicit_physical);
-        if (session.output_name_override && !session.output_name_override->empty() && !session.virtual_display && !client_requests_virtual) {
-          requests_virtual = false;
-        }
-        if (requests_virtual) {
+        const bool virtual_requested = session.virtual_display ||
+          session.client_virtual_display_override.value_or(session.client_requests_virtual_display) ||
+          session.virtual_display_mode_override.value_or(config::video.virtual_display_mode) != config::video_t::virtual_display_mode_e::disabled;
+        if (virtual_requested || rtsp_stream::hdr_capture_required(session, config::video)) {
           session.virtual_display_failed = true;
-          return {false, {}, "Hyprland supports physical display streaming only; select a physical display"};
+          return {false, {}, "Hyprland KMS supports existing physical SDR outputs only; disable private/Remote Monitor and native HDR capture requests"};
         }
-
-        if (!session.display_power_guard) {
-          session.display_power_guard = display_power::acquire();
+        const auto devices = enumerate_devices(display_device::DeviceEnumerationDetail::Full);
+        const auto requested = session.output_name_override.value_or(config::video.output_name);
+        if (requested.empty()) {
+          return {false, {}, "Hyprland KMS requires an explicit physical SDR connector; set output_name before streaming"};
         }
-        if (!session.display_power_guard) {
-          session.virtual_display_failed = true;
-          return {false, {}, "The desktop display could not be woken for streaming"};
+        const auto selected = devices ? std::ranges::find_if(*devices, [&](const auto &device) {
+          return requested == device.m_device_id;
+        }) : display_device::EnumeratedDeviceList::const_iterator {};
+        if (!devices || selected == devices->end()) {
+          return {false, {}, "Hyprland KMS requires an enabled physical output selected by its exact connector name"};
         }
-
+        session.output_name_override = selected->m_device_id;
         session.virtual_display = false;
         session.virtual_display_failed = false;
         session.virtual_display_device_id.clear();
@@ -49,22 +57,36 @@ namespace platf::linux_display {
         session.virtual_display_hdr_enabled.reset();
         session.virtual_display_recreated_on_demand = false;
         session.virtual_display_needs_resume_apply = false;
-        session.virtual_display_mode_override = config::video_t::virtual_display_mode_e::disabled;
-        const auto output_name = session.output_name_override.value_or(config::get_active_output_name());
-        return {false, output_name, {}};
+        return {false, *session.output_name_override, {}};
       }
 
-      capabilities_t capabilities() const override { return {"hyprland-physical"}; }
+      capabilities_t capabilities() const override { return {"hyprland-kms-physical-sdr"}; }
 
       std::optional<display_device::EnumeratedDeviceList> enumerate_devices(display_device::DeviceEnumerationDetail) const override {
-        // The privileged capture host has no IPC connection to Hyprland.
-        // Capture discovers physical DRM outputs independently.
-        return std::nullopt;
+        display_device::EnumeratedDeviceList result;
+        for (const auto &name : platf::display_names()) {
+          if (!physical_output(name)) continue;
+          display_device::EnumeratedDevice device;
+          device.m_device_id = name;
+          device.m_display_name = name;
+          device.m_friendly_name = name;
+          result.push_back(std::move(device));
+        }
+        return result;
       }
 
-      std::string capture_target(const std::string &requested_output) const override {
-        return requested_output;
+      std::string capture_target(const std::string &requested) const override {
+        const auto devices = enumerate_devices(display_device::DeviceEnumerationDetail::Full);
+        if (devices) {
+          for (const auto &device : *devices) {
+            if (!requested.empty() && device.m_device_id == requested) return device.m_device_id;
+          }
+        }
+        // A nonempty unresolvable name makes KMS fail instead of choosing the
+        // first output, which could be a preserved connector from a KDE host.
+        return "__unsupported-hyprland-output__";
       }
+      bool reset_persistence() const override { return false; }
     };
 
     class desktop_backend_t final : public backend_t {
@@ -102,17 +124,15 @@ namespace platf::linux_display {
 #endif
 
   const backend_t &backend() {
+    if (hyprland_kms_session()) {
+      static const hyprland_backend_t hyprland;
+      return hyprland;
+    }
 #ifdef SUNSHINE_BUILD_GAMESCOPE
     if (gamescope_capture_selected()) {
       return gamescope_backend();
     }
 #endif
-    // The root-owned supervisor supplies this value from the verified session.
-    const auto compositor = std::getenv("VIBEPOLLO_SESSION_COMPOSITOR");
-    if (compositor && std::string_view {compositor} == "hyprland") {
-      static const hyprland_backend_t hyprland;
-      return hyprland;
-    }
     static const desktop_backend_t desktop;
     return desktop;
   }
