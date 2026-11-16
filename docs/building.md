@@ -226,13 +226,13 @@ cache discovered by CMake:
 
 ```bash
 ./scripts/build_linux_webrtc.sh
-cmake -S . -B build
+cmake -S . -B build -DSUNSHINE_ENABLE_WEBRTC=ON
 cmake --build build
 ```
 
-WebRTC is enabled by default on Linux. Set `VIBEPOLLO_DEPS_DIR` to relocate the shared dependency cache or
-`WEBRTC_BUILD_JOBS` to limit parallelism. The installed Linux package includes `libwebrtc.so` automatically. Pass
-`-DSUNSHINE_ENABLE_WEBRTC=OFF` only when intentionally building without WebRTC.
+WebRTC is optional and defaults to disabled, so clean builds do not require a staged libwebrtc library.
+Set `VIBEPOLLO_DEPS_DIR` to relocate the shared dependency cache or `WEBRTC_BUILD_JOBS` to limit parallelism.
+When WebRTC is enabled, the installed Linux package includes `libwebrtc.so` automatically.
 
 ###### Windows quickstart
 

@@ -15,12 +15,7 @@ option(BUILD_WERROR "Enable -Werror flag." OFF)
 option(SUNSHINE_CONFIGURE_ONLY "Configure special files only, then exit." OFF)
 
 option(SUNSHINE_ENABLE_TRAY "Enable system tray icon." ON)
-if(UNIX AND NOT APPLE)
-    set(SUNSHINE_ENABLE_WEBRTC_DEFAULT ON)
-else()
-    set(SUNSHINE_ENABLE_WEBRTC_DEFAULT OFF)
-endif()
-option(SUNSHINE_ENABLE_WEBRTC "Enable WebRTC streaming support." ${SUNSHINE_ENABLE_WEBRTC_DEFAULT})
+option(SUNSHINE_ENABLE_WEBRTC "Enable WebRTC streaming support." OFF)
 
 # PyroWave GPU encoders are available on Windows and Linux.
 if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")

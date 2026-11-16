@@ -6,7 +6,9 @@ live Hyprland/NVIDIA capture, application, login and suspend validation is still
 required before claiming this platform works on a particular machine.
 
 Use a Hyprland session started by SDDM through **Hyprland (uwsm-managed)**,
-using UWSM's `hyprland.desktop` entry. The controller still requires the chosen
+or by `ly` using UWSM's `hyprland.desktop` entry. Ly admission requires the
+explicit `hyprland-kms` policy described below; the default KWin policy does
+not admit Ly sessions. The controller still requires the chosen
 local desktop account, active Wayland logind session and seat0. UWSM must publish
 its current `WAYLAND_DISPLAY` to the user manager and finish starting
 `wayland-wm@hyprland.desktop.service`,

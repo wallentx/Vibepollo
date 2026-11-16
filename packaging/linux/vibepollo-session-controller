@@ -78,7 +78,10 @@ classify_session_role() {
      "$observed_state" == active ]] || return 1
 
   if [[ "$observed_name" == "$desktop_user" && "$observed_user" == "$desktop_uid" &&
-        "$observed_class" == user ]] && desktop_service_supported "$observed_service"; then
+        "$observed_class" == user ]] && {
+          desktop_service_supported "$observed_service" ||
+            [[ "$desktop_backend" == hyprland-kms && "$observed_service" == ly ]]
+        }; then
     candidate_role=desktop
   elif [[ "$observed_name" == "$greeter_user" && "$observed_class" == greeter &&
           "$observed_service" == plasmalogin-greeter ]]; then
