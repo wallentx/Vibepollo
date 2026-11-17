@@ -1,0 +1,20 @@
+diff --git a/libwebrtc/src/passthrough_video_encoder.cc b/libwebrtc/src/passthrough_video_encoder.cc
+index 3a322c8..dd77e60 100644
+--- a/libwebrtc/src/passthrough_video_encoder.cc
++++ b/libwebrtc/src/passthrough_video_encoder.cc
+@@ -24,15 +24,12 @@ namespace {
+ // H.264 NAL unit types
+ constexpr uint8_t kH264NalTypeSps = 7;
+ constexpr uint8_t kH264NalTypePps = 8;
+-constexpr uint8_t kH264NalTypeIdr = 5;
+ constexpr uint8_t kH264NalTypeMask = 0x1F;
+ 
+ // HEVC NAL unit types
+ constexpr uint8_t kHevcNalTypeVps = 32;
+ constexpr uint8_t kHevcNalTypeSps = 33;
+ constexpr uint8_t kHevcNalTypePps = 34;
+-constexpr uint8_t kHevcNalTypeIdrWRadl = 19;
+-constexpr uint8_t kHevcNalTypeIdrNLp = 20;
+ 
+ // Get H.264 NAL type from first byte
+ inline uint8_t GetH264NalType(uint8_t first_byte) {

@@ -39,6 +39,34 @@ namespace {
     return value;
   }
 
+  TEST(CryptoCertificate, GeneratedCredentialsHaveMatchingNamesAndValidSignature) {
+    const auto &credentials = first_credentials();
+    auto certificate = crypto::x509(credentials.x509);
+    auto key = crypto::pkey(credentials.pkey);
+    ASSERT_TRUE(certificate);
+    ASSERT_TRUE(key);
+    EXPECT_EQ(X509_check_private_key(certificate.get(), key.get()), 1);
+
+    EXPECT_EQ(crypto::subject_name(certificate.get()), "/CN=First client");
+    EXPECT_EQ(X509_NAME_cmp(X509_get_subject_name(certificate.get()), X509_get_issuer_name(certificate.get())), 0);
+
+    const auto signature = crypto::signature(certificate);
+    ASSERT_EQ(signature.size(), 256u);
+    const auto size = i2d_re_X509_tbs(certificate.get(), nullptr);
+    ASSERT_GT(size, 0);
+    std::vector<unsigned char> signed_data(static_cast<std::size_t>(size));
+    auto *output = signed_data.data();
+    ASSERT_EQ(i2d_re_X509_tbs(certificate.get(), &output), size);
+    const std::string_view data {reinterpret_cast<const char *>(signed_data.data()), signed_data.size()};
+    EXPECT_TRUE(crypto::verify256(certificate, data, signature));
+  }
+
+  TEST(CryptoCertificate, UnsignedCertificateHasNoSignature) {
+    crypto::x509_t certificate {X509_new()};
+    ASSERT_TRUE(certificate);
+    EXPECT_TRUE(crypto::signature(certificate).empty());
+  }
+
   void add_native_certificate(crypto::cert_chain_t &chain, const std::string &pem) {
     auto record = std::make_shared<crypto::named_cert_t>();
     record->cert = pem;

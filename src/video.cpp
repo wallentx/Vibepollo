@@ -7024,7 +7024,14 @@ namespace video {
             return;
           }
 #endif
-          destroy_encode_session_bounded(session, "probe"sv);
+          if (encoder.flags & ASYNC_TEARDOWN) {
+            destroy_encode_session_bounded(session, "probe"sv);
+          } else {
+            // EGL contexts are current to the thread that created them. Destroying a
+            // VA-API probe session on the watchdog worker leaves Mesa's context current
+            // here, so the next codec probe can crash while unbinding the stale context.
+            session.reset();
+          }
         });
 
         // Keep the probe image alive while native AMF primes a lookahead pipeline.

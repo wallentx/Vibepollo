@@ -42,6 +42,34 @@ for service in plasmalogin plasmalogin-autologin sddm sddm-autologin; do
   check_role desktop 1000 chasep seat0 no wayland user yes active "$service"
 done
 
+# Ly admission requires the explicit Hyprland policy. The subsequent readiness
+# checks still bind the fixed UWSM unit and the compositor socket peer.
+desktop_backend=kwin
+check_rejected 2 'user=chasep class=user service=ly' \
+  1000 chasep seat0 no wayland user yes active ly
+desktop_backend=hyprland-kms
+check_role desktop 1000 chasep seat0 no wayland user yes active ly
+for index in 2 3 4 6 7; do
+  rejected=(1000 chasep seat0 no wayland user yes active ly)
+  case "$index" in
+    2) rejected[$index]=seat1 ;;
+    3) rejected[$index]=yes ;;
+    4) rejected[$index]=x11 ;;
+    6) rejected[$index]=no ;;
+    7) rejected[$index]=closing ;;
+  esac
+  check_rejected 1 '' "${rejected[@]}"
+done
+check_rejected 2 'user=other class=user service=ly' \
+  1000 other seat0 no wayland user yes active ly
+check_rejected 2 'user=chasep class=user service=ly' \
+  1001 chasep seat0 no wayland user yes active ly
+check_rejected 2 'user=chasep class=greeter service=ly' \
+  1000 chasep seat0 no wayland greeter yes active ly
+check_rejected 2 'user=chasep class=user service=sshd' \
+  1000 chasep seat0 no wayland user yes active sshd
+desktop_backend=kwin
+
 # Each authoritative logind boundary rejects a desktop session independently.
 for index in 2 3 4 6 7; do
   rejected=("${desktop[@]}")

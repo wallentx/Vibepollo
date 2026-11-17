@@ -41,6 +41,10 @@ include_directories(SYSTEM ${MINIUPNP_INCLUDE_DIRS})
 # ffmpeg pre-compiled binaries
 include("${CMAKE_MODULE_PATH}/dependencies/ffmpeg.cmake")
 
+if(SUNSHINE_ENABLE_WEBRTC)
+    include("${CMAKE_MODULE_PATH}/dependencies/webrtc.cmake")
+endif()
+
 # Opus
 # Homebrew provides opus as a dynamic library only, so disable static linking for Homebrew builds
 if(SUNSHINE_BUILD_HOMEBREW)
