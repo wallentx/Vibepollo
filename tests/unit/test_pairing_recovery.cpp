@@ -20,6 +20,8 @@
 
 #ifdef _WIN32
   #include <Windows.h>
+  // Wincrypt defines this encoding identifier after OpenSSL declared its type.
+  #undef X509_NAME
 #else
   #include <csignal>
   #include <sys/resource.h>
